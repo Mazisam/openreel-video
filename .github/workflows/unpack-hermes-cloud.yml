@@ -1,0 +1,77 @@
+name: Prepare Hermes Cloud
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-hermes-cloud
+  cancel-in-progress: false
+
+jobs:
+  unpack:
+    if: github.repository == 'yasharrrrrr/openreel-video' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, pinned
+        with:
+          ref: main
+
+      - name: Verify and extract the connector
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, zipfile
+          from pathlib import Path, PurePosixPath
+          archive = Path('OpenReel-Hermes-Cloud-0.1.0.zip')
+          expected = '0fde64ddc281b2866a2a51b25fbffbb548759b1d555cdbe6f7176e77e1251287'
+          if not archive.is_file() or archive.stat().st_size > 2_000_000:
+              raise SystemExit('CONNECTOR_ZIP_MISSING_OR_TOO_LARGE')
+          if hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+              raise SystemExit('CONNECTOR_ZIP_CHECKSUM_MISMATCH')
+          prefix = 'OpenReel-Hermes-Cloud-0.1.0/hermes-cloud/'
+          base = Path.cwd().resolve()
+          planned = []
+          with zipfile.ZipFile(archive) as z:
+              for info in z.infolist():
+                  if info.is_dir() or not info.filename.startswith(prefix):
+                      continue
+                  relative = PurePosixPath(info.filename[len(prefix):])
+                  if relative.is_absolute() or '..' in relative.parts:
+                      raise SystemExit('UNSAFE_ARCHIVE_PATH')
+                  target = Path('hermes-cloud').joinpath(*relative.parts)
+                  if not target.resolve().is_relative_to(base):
+                      raise SystemExit('UNSAFE_TARGET_PATH')
+                  if target.is_symlink() or any(p.is_symlink() for p in target.parents):
+                      raise SystemExit('SYMLINK_TARGET_NOT_ALLOWED')
+                  payload = z.read(info)
+                  if target.exists() and (not target.is_file() or target.read_bytes() != payload):
+                      raise SystemExit('EXISTING_FILE_CHANGED: ' + str(target))
+                  planned.append((target, payload))
+          if len(planned) != 25:
+              raise SystemExit('CONNECTOR_FILE_COUNT_MISMATCH')
+          for target, payload in planned:
+              if not target.exists():
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(payload)
+          os.chmod('hermes-cloud/entrypoint.sh', 0o755)
+          print('HERMES_CLOUD_EXTRACTED: ' + str(len(planned)) + ' files')
+          PY
+
+      - name: Commit connector source to the fork
+        shell: bash
+        run: |
+          git config --local user.name 'github-actions[bot]'
+          git config --local user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- hermes-cloud
+          if git diff --cached --quiet; then
+            echo 'HERMES_CLOUD_ALREADY_READY'
+            exit 0
+          fi
+          git commit -m 'Add Hermes cloud MCP API, queue and MP4 renderer'
+          git push origin HEAD:main
+          echo 'HERMES_CLOUD_READY'
