@@ -257,7 +257,7 @@ def main():
     diagnostic.seek(max(0,diagnostic.tell()-4000))
     error = diagnostic.read()
     diagnostic.close()
-    if code!=0: raise RuntimeError('FFMPEG_FAILED: '+error[-1600:])
+    if code!=0: raise RuntimeError('FFMPEG_FAILED: exit=%s%s %s' % (code, ' (killed by signal %d, usually out of memory)' % -code if code<0 else '', error[-1600:]))
     post = {}
     if manifest.get('loudnorm'): post['loudnorm'] = normalise_loudness(output, manifest['loudnorm'], duration)
     result = inspect_media(output)
