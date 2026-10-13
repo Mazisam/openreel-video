@@ -5,6 +5,7 @@ const n = (minimum=0,maximum=600) => ({type:'number',minimum,maximum});
 const str = {type:'string',minLength:1,maxLength:120};
 const id = {type:'string',pattern:'^[A-Za-z0-9_-]{1,80}$'};
 const xy = (a,b) => obj({x:n(a,b),y:n(a,b)});
+const hex = {type:'string',pattern:'^#[0-9A-Fa-f]{6}$'};
 const transform = obj({position:xy(-4096,4096),scale:xy(.1,4),opacity:n(0,1),
   fitMode:{enum:['contain','cover','stretch']}});
 export const actions = {
@@ -35,10 +36,18 @@ export function checkAction(action) {
 const uuid = {type:'string',pattern:'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'};
 export const schemas = {
   project:obj({name:str,width:{type:'integer',minimum:64,maximum:1920},height:{type:'integer',minimum:64,maximum:1920},frameRate:{enum:[24,25,30]}},['name']),
-  job:obj({kind:{enum:['import','edit','render']},project_id:uuid,idempotency_key:{type:'string',pattern:'^[A-Za-z0-9_.:-]{8,128}$'},expected_revision:{type:'integer',minimum:0},input:{type:'object'}},['kind','project_id','idempotency_key','input']),
+  job:obj({kind:{enum:['import','edit','render','analyze','qa']},project_id:uuid,idempotency_key:{type:'string',pattern:'^[A-Za-z0-9_.:-]{8,128}$'},expected_revision:{type:'integer',minimum:0},input:{type:'object'}},['kind','project_id','idempotency_key','input']),
   import:obj({url:{type:'string',maxLength:8000},name:str},['url']),
   edit:obj({actions:{type:'array',minItems:1,maxItems:100,items:obj({type:{enum:Object.keys(actions)},params:{type:'object'}},['type','params'])}},['actions']),
-  render:obj({crf:{type:'integer',minimum:18,maximum:28}},[]),
+  render:obj({crf:{type:'integer',minimum:18,maximum:28},
+    caption_style:obj({font:{enum:['DejaVu Sans','Noto Sans','Noto Sans Arabic','Noto Naskh Arabic','Noto Kufi Arabic']},size_pct:n(2,12),margin_v_pct:n(0,45),margin_h_pct:n(0,25),outline_pct:n(0,2),
+      position:{enum:['bottom','middle','top']},color:hex,outline_color:hex,box:{type:'boolean'},bold:{type:'boolean'}}),
+    loudnorm:obj({target_lufs:n(-30,-5),true_peak_dbtp:n(-6,0)})},[]),
+  analyze:obj({media_id:uuid,frames:obj({max:{type:'integer',minimum:4,maximum:40},width:{type:'integer',minimum:160,maximum:720}}),
+    asr:obj({engine:{enum:['auto','off','faster-whisper']},language:{type:'string',pattern:'^[a-z]{2,3}$'},model:{enum:['tiny','base','small','medium']}})},['media_id']),
+  qa:obj({render_job_id:uuid,expect:obj({width:{type:'integer',minimum:64,maximum:1920},height:{type:'integer',minimum:64,maximum:1920},duration:n(.04,600),tolerance:n(.05,5)}),
+    plan:obj({loudness_target_lufs:n(-30,-5),true_peak_max_dbtp:n(-6,0),allow_silence:{type:'boolean'},allow_black_frames:{type:'boolean'},allow_frozen_frames:{type:'boolean'}}),
+    frames_at:{type:'array',maxItems:24,items:n(0,600)}},['render_job_id']),
 };
 const compiled = Object.fromEntries(Object.entries(schemas).map(([k,s])=>[k,ajv.compile(s)]));
 export function validate(kind,data) {

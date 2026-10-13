@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createReadStream, createWriteStream, promises as fs } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { resolve } from 'node:path';
@@ -8,7 +9,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { Store, safeId } from './storage.mjs';
-import { Queue, verifyLink } from './queue.mjs';
+import { Queue, verifyLink, artifactNames, ARTIFACT_NAME } from './queue.mjs';
 import { newProject } from './project.mjs';
 import { actions, validate, obj, schemas } from './schema.mjs';
 import { MAX_MEDIA_BYTES } from './media.mjs';
@@ -24,12 +25,26 @@ const publicURL=new URL(config.publicURL);
 const cors=(process.env.CORS_ORIGINS||'').split(',').map(s=>s.trim()).filter(Boolean);
 const store=new Store(resolve(process.env.DATA_DIR||'./data'));await store.init();
 const queue=new Queue(store,config);await queue.init();
+
 let uploading=false;
-const caps={version:'0.1.0',editing:'OpenReel HeadlessHost',rendering:'cloud FFmpeg subset',llm_calls:0,
+const VERSION='0.2.0';
+const caps={version:VERSION,editing:'OpenReel HeadlessHost',rendering:'cloud FFmpeg subset',llm_calls:0,
   limits:{concurrent_renders:1,max_seconds:600,max_pixels:2073600,max_dimension:1920,max_media_bytes:MAX_MEDIA_BYTES,max_output_bytes:256*1024**2,max_queued:32,max_clips:100},
-  supported:['cut','trim','reorder','static image/video overlays','contain/cover/stretch','scale/position/opacity','audio mix/volume/fades','plain Unicode subtitles','H.264/AAC MP4','portrait/landscape'],
+  supported:['cut','trim','reorder','static image/video overlays','contain/cover/stretch','scale/position/opacity','audio mix/volume/fades','plain Unicode subtitles with a bounded caption style (font, size, position, colours, box)','two-pass EBU R128 loudness normalisation (render option)','source analysis job: probe, loudness, silence, scene cuts, representative frames, optional speech recognition','technical QA job on a finished render','H.264/AAC MP4','portrait/landscape'],
   unsupported:['GPU effects','keyframe animation','3D','motion scenes','textClips','transitions','variable speed','arbitrary scripts'],
+  analysis:{engine_version:'0.2.0',artifacts:'GET /api/jobs/{id}/artifacts[/name]',asr:{configured:process.env.ASR_ENGINE||null,available:false},caption_fonts:['DejaVu Sans','Noto Sans','Noto Sans Arabic','Noto Naskh Arabic','Noto Kufi Arabic'],
+    heavy_work:'cloud only; never routed to the Hermes VPS'},
   security_model:'one private owner token; not a guest/tenant service'};
+// Speech recognition is optional; report honestly whether the configured engine can import.
+{
+  const fonts=spawn('fc-list',[':','family'],{stdio:['ignore','pipe','ignore']});let text='';
+  fonts.stdout.on('data',c=>text+=c);fonts.on('error',()=>{});
+  fonts.on('close',()=>{const have=new Set(text.split('\n').flatMap(l=>l.split(',').map(x=>x.trim())));const ok=caps.analysis.caption_fonts.filter(f=>have.has(f));if(ok.length)caps.analysis.caption_fonts=ok;});
+}
+if(caps.analysis.asr.configured==='faster-whisper') {
+  const probe=spawn('python3',['-c','import faster_whisper'],{stdio:'ignore'});
+  probe.on('close',code=>{caps.analysis.asr.available=code===0;});probe.on('error',()=>{});
+}
 const tools=[
   {name:'openreel_capabilities',description:'Supported render features and cloud limits. No model calls are made by this service.',inputSchema:obj({})},
   {name:'openreel_projects',description:'Create, list, or read an OpenReel cloud project. Get its revision before editing/rendering.',inputSchema:obj({action:{enum:['create','list','get']},project_id:{type:'string'},settings:schemas.project},['action'])},
@@ -74,7 +89,7 @@ async function body(req) {
   try{return JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{throw new Error('INVALID_JSON');}
 }
 async function mcp(req,res) {
-  const server=new Server({name:'openreel-cloud',version:'0.1.0'},{capabilities:{tools:{}}});
+  const server=new Server({name:'openreel-cloud',version:VERSION},{capabilities:{tools:{}}});
   server.setRequestHandler(ListToolsRequestSchema,async()=>({tools}));
   server.setRequestHandler(CallToolRequestSchema,async request=>{
     try {const value=await tool(request.params.name,request.params.arguments||{});return {content:[{type:'text',text:JSON.stringify(value)}]};}
@@ -110,7 +125,7 @@ const app=http.createServer(async(req,res)=>{
       res.setHeader('Access-Control-Allow-Headers','Authorization,Content-Type,Idempotency-Key');res.setHeader('Access-Control-Allow-Methods','GET,POST,DELETE,OPTIONS');
     }
     if(req.method==='OPTIONS'){res.writeHead(204);res.end();return;}
-    if(req.method==='GET'&&url.pathname==='/health'){reply(res,200,{status:'ok',version:'0.1.0',renderer:'cloud'});return;}
+    if(req.method==='GET'&&url.pathname==='/health'){reply(res,200,{status:'ok',version:VERSION,renderer:'cloud'});return;}
     const output=url.pathname.match(/^\/outputs\/([0-9a-f-]{36})\.mp4$/);
     if(output&&req.method==='GET') {
       safeId(output[1]);
@@ -131,6 +146,20 @@ const app=http.createServer(async(req,res)=>{
     if(project&&req.method==='DELETE'){reply(res,200,await queue.deleteProject(project[1]));return;}
     if(req.method==='POST'&&url.pathname==='/api/media/upload'){reply(res,202,await upload(req,url));return;}
     if(req.method==='POST'&&url.pathname==='/api/jobs'){reply(res,202,await queue.enqueue(await body(req)));return;}
+    const artifact=url.pathname.match(/^\/api\/jobs\/([0-9a-f-]{36})\/artifacts(?:\/([a-z0-9.]+))?$/);
+    if(artifact&&req.method==='GET') {
+      safeId(artifact[1]);const info=queue.get(artifact[1]);
+      if(!['analyze','qa'].includes(info.kind)||info.status!=='completed')throw new Error('ARTIFACTS_NOT_READY');
+      const names=await artifactNames(store,artifact[1]);
+      if(!artifact[2]){
+        const list=[];for(const name of names)list.push({name,bytes:(await fs.stat(store.path('outputs',artifact[1],'.'+name))).size});
+        reply(res,200,{job_id:artifact[1],artifacts:list});return;
+      }
+      if(!ARTIFACT_NAME.test(artifact[2])||!names.includes(artifact[2]))throw new Error('NOT_FOUND');
+      const path=store.path('outputs',artifact[1],'.'+artifact[2]),stat=await fs.stat(path);
+      res.writeHead(200,{'Content-Type':artifact[2].endsWith('.json')?'application/json':'image/jpeg','Content-Length':stat.size,'Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'});
+      await pipeline(createReadStream(path),res);return;
+    }
     const job=url.pathname.match(/^\/api\/jobs\/([0-9a-f-]{36})(\/cancel)?$/);
     if(job){safeId(job[1]);
       if(req.method==='GET'&&!job[2]){reply(res,200,queue.get(job[1]));return;}

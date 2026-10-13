@@ -48,10 +48,49 @@ def ass_time(t):
     cs = round(t*100)
     return f'{cs//360000}:{cs//6000%60:02}:{cs//100%60:02}.{cs%100:02}'
 
-def subtitles_file(subtitles, width, height, path):
-    lines = ['[Script Info]','ScriptType: v4.00+',f'PlayResX: {width}',f'PlayResY: {height}',
+CAPTION_FONTS = ('DejaVu Sans', 'Noto Sans', 'Noto Sans Arabic', 'Noto Naskh Arabic', 'Noto Kufi Arabic')
+CAPTION_POSITIONS = {'bottom': 2, 'middle': 5, 'top': 8}
+
+def installed_fonts():
+    try:
+        out = subprocess.run(['fc-list', ':', 'family'], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return {name.strip() for line in out.splitlines() for name in line.split(',')}
+
+def ass_colour(value, label):
+    if not isinstance(value, str) or len(value) != 7 or value[0] != '#' or any(c not in '0123456789abcdefABCDEF' for c in value[1:]):
+        raise ValueError('INVALID_' + label)
+    return '&H00' + value[5:7] + value[3:5] + value[1:3]  # ASS is BGR
+
+def caption_style_line(style, width, height):
+    style = style or {}
+    font = style.get('font', 'DejaVu Sans')
+    if font not in CAPTION_FONTS: raise ValueError('INVALID_CAPTION_FONT')
+    have = installed_fonts()
+    if have is not None and font not in have: raise ValueError('INVALID_CAPTION_FONT_NOT_INSTALLED')
+    size = number(style.get('size_pct', 5), 2, 12, 'CAPTION_SIZE')
+    margin_v = number(style.get('margin_v_pct', 8), 0, 45, 'CAPTION_MARGIN')
+    margin_h = number(style.get('margin_h_pct', 5), 0, 25, 'CAPTION_MARGIN')
+    outline = number(style.get('outline_pct', 0.35), 0, 2, 'CAPTION_OUTLINE')
+    position = style.get('position', 'bottom')
+    if position not in CAPTION_POSITIONS: raise ValueError('INVALID_CAPTION_POSITION')
+    primary = ass_colour(style.get('color', '#FFFFFF'), 'CAPTION_COLOR')
+    edge = ass_colour(style.get('outline_color', '#202020'), 'CAPTION_COLOR')
+    box = bool(style.get('box', False))
+    border_style = 3 if box else 1
+    back = '&H70000000' if box else '&H80000000'
+    # With BorderStyle 3 libass draws the box from the outline colour.
+    edge_colour = '&H70000000' if box else edge
+    outline_px = max(1, round(height * outline / 100)) if not box else max(6, round(height * 0.012))
+    return (f"Style: Default,{font},{round(height * size / 100)},{primary},{primary},{edge_colour},{back},"
+            f"{-1 if style.get('bold') else 0},0,0,0,100,100,0,0,{border_style},{outline_px},{1 if not box else 0},{CAPTION_POSITIONS[position]},"
+            f"{round(width * margin_h / 100)},{round(width * margin_h / 100)},{round(height * margin_v / 100)},1")
+
+def subtitles_file(subtitles, width, height, path, style=None):
+    lines = ['[Script Info]','ScriptType: v4.00+',f'PlayResX: {width}',f'PlayResY: {height}','WrapStyle: 0','ScaledBorderAndShadow: yes',
         '[V4+ Styles]','Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding',
-        f'Style: Default,DejaVu Sans,{round(height*.05)},&H00FFFFFF,&H00FFFFFF,&H00202020,&H80000000,0,0,0,0,100,100,0,0,1,2,1,2,30,30,{round(height*.08)},1',
+        caption_style_line(style, width, height),
         '[Events]','Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text']
     for sub in subtitles:
         if sub.get('style') or sub.get('animationStyle') or sub.get('words'): raise ValueError('UNSUPPORTED_STYLED_CAPTIONS')
@@ -64,7 +103,7 @@ def subtitles_file(subtitles, width, height, path):
         lines.append(f'Dialogue: 0,{ass_time(start)},{ass_time(end)},Default,,0,0,0,,{text}')
     Path(path).write_text('\n'.join(lines),encoding='utf-8')
 
-def compile_command(project, assets, output, crf=22):
+def compile_command(project, assets, output, crf=22, caption_style=None):
     for field in ('textClips','shapeClips','svgClips','stickerClips','adjustmentLayers','masks','compoundClips','nestedInstances','motionInstances','motionCompositions','generatedShaders','creation','multicamGroups'):
         if project.get(field): raise ValueError('UNSUPPORTED_PROJECT_FEATURE_' + field)
     settings = project['settings']
@@ -138,7 +177,7 @@ def compile_command(project, assets, output, crf=22):
     subs = timeline.get('subtitles',[])
     if subs:
         ass = Path(output).with_suffix('.ass')
-        subtitles_file(subs,width,height,ass)
+        subtitles_file(subs,width,height,ass,caption_style)
         # Controller-generated safe paths only; user strings never enter filter paths.
         escaped = str(ass).replace('\\','\\\\').replace(':','\\:').replace("'", "'\\''")
         filters.append(f"[{base}]subtitles=filename='{escaped}'[captioned]")
@@ -149,12 +188,59 @@ def compile_command(project, assets, output, crf=22):
         '-movflags','+faststart','-progress','pipe:1',str(output)]
     return args, duration
 
+
+def measure_loudness(path, fmt, target=-14.0, true_peak=-1.0, timeout=300):
+    """EBU R128 measurement through loudnorm's analysis pass. Returns raw strings for the second pass."""
+    proc = subprocess.run(['ffmpeg','-hide_banner','-nostats','-nostdin','-protocol_whitelist','file,pipe','-f',fmt,'-i',str(path),'-vn',
+        '-af',f'loudnorm=I={target}:TP={true_peak}:LRA=11:print_format=json','-f','null','-'],capture_output=True,text=True,timeout=timeout,errors='replace')
+    err = proc.stderr or ''
+    start, end = err.rfind('{'), err.rfind('}')
+    if proc.returncode != 0 or start < 0 or end < start: return None
+    try: return json.loads(err[start:end+1])
+    except ValueError: return None
+
+def finite(value):
+    try:
+        number_ = float(value)
+        return number_ if math.isfinite(number_) else None
+    except (TypeError, ValueError): return None
+
+def normalise_loudness(output, config, duration):
+    """Linear two-pass loudnorm on the finished mix; video is stream-copied. Returns a report dict."""
+    target = number(config.get('target_lufs', -14), -30, -5, 'LOUDNESS_TARGET')
+    ceiling = number(config.get('true_peak_dbtp', -1.0), -6, 0, 'TRUE_PEAK')
+    # Keep half a dB of headroom: the AAC re-encode can move inter-sample peaks.
+    inner_tp = max(-9.0, ceiling - 0.5)
+    measured = measure_loudness(output, 'mov', target, inner_tp)
+    report = {'requested': {'target_lufs': target, 'true_peak_dbtp': ceiling}}
+    if not measured or finite(measured.get('input_i')) is None or finite(measured.get('input_i')) < -60:
+        report['applied'] = False
+        report['reason'] = 'audio_not_measurable_or_silent'
+        return report
+    report['before'] = {'integrated_lufs': finite(measured['input_i']), 'true_peak_dbtp': finite(measured['input_tp']),
+                        'loudness_range_lu': finite(measured['input_lra'])}
+    temp = Path(output).with_suffix('.norm.mp4')
+    flt = (f"loudnorm=I={target}:TP={inner_tp}:LRA=11:measured_I={measured['input_i']}:measured_TP={measured['input_tp']}:"
+           f"measured_LRA={measured['input_lra']}:measured_thresh={measured['input_thresh']}:offset={measured['target_offset']}:linear=true:print_format=summary")
+    proc = subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-nostdin','-y','-protocol_whitelist','file,pipe','-f','mov','-i',str(output),
+        '-map','0:v:0','-map','0:a:0','-c:v','copy','-af',flt,'-c:a','aac','-b:a','160k','-ar','48000','-movflags','+faststart',str(temp)],
+        capture_output=True,text=True,timeout=300,errors='replace')
+    if proc.returncode != 0 or not temp.is_file():
+        temp.unlink(missing_ok=True)
+        raise RuntimeError('LOUDNESS_PASS_FAILED: ' + (proc.stderr or '')[-800:])
+    os.replace(temp, output)
+    after = measure_loudness(output, 'mov', target, inner_tp)
+    report['applied'] = True
+    if after: report['after'] = {'integrated_lufs': finite(after['input_i']), 'true_peak_dbtp': finite(after['input_tp']),
+                                 'loudness_range_lu': finite(after['input_lra'])}
+    return report
+
 def main():
     if sys.argv[1]=='--probe':
         print(json.dumps(inspect_media(sys.argv[2]))); return
     manifest = json.loads(Path(sys.argv[1]).read_text())
     output = Path(manifest['output'])
-    args, duration = compile_command(manifest['project'],manifest['assets'],output,manifest.get('crf',22))
+    args, duration = compile_command(manifest['project'],manifest['assets'],output,manifest.get('crf',22),manifest.get('caption_style'))
     diagnostic = tempfile.TemporaryFile(mode='w+')
     child = subprocess.Popen(args,stdout=subprocess.PIPE,stderr=diagnostic,text=True)
     def cancel(_sig,_frame):
@@ -172,10 +258,12 @@ def main():
     error = diagnostic.read()
     diagnostic.close()
     if code!=0: raise RuntimeError('FFMPEG_FAILED: '+error[-1600:])
+    post = {}
+    if manifest.get('loudnorm'): post['loudnorm'] = normalise_loudness(output, manifest['loudnorm'], duration)
     result = inspect_media(output)
     if result['codec']!='h264' or not result['hasAudio'] or abs(result['duration']-duration)>.2:
         raise RuntimeError('OUTPUT_VALIDATION_FAILED')
-    print(json.dumps({'progress':100,'output':output.name,'metadata':result}),flush=True)
+    print(json.dumps({'progress':100,'output':output.name,'metadata':result,'postprocess':post}),flush=True)
 
 if __name__ == '__main__':
     try: main()

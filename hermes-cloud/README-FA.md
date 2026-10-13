@@ -1,4 +1,4 @@
-# OpenReel → Hermes Cloud Connector 0.1.0
+# OpenReel → Hermes Cloud Connector 0.2.0
 
 این پوشه را کنار `apps/` و `packages/`، در ریشهٔ فورک OpenReel قرار دهید.
 این نسخه واقعاً ساخته و در محیط توسعه آزمایش شده است؛ هنوز در حساب Railway یا Vercel شما مستقر نشده است.
@@ -228,9 +228,25 @@ npm test
 python3 tools/test_connect.py
 ```
 
-در محیط ساخت این بسته: **۱۸ آزمون Node و ۳ آزمون Python موفق**. آزمون end-to-end با کلاینت رسمی MCP انجام شد؛ ویدیوی واقعی ساخته شد، رنگ فریم‌های قبل/حین/بعد overlay بررسی شد، صدای واقعی و زیرنویس قابل‌دیدن تأیید شد. duplicate، conflict، restart و cancel هم آزموده شدند.
+در محیط ساخت نسخهٔ 0.1.0: **۱۸ آزمون Node و ۳ آزمون Python موفق** (نسخهٔ 0.2.0: ۲۹ آزمون Node، بخش ۹). آزمون end-to-end با کلاینت رسمی MCP انجام شد؛ ویدیوی واقعی ساخته شد، رنگ فریم‌های قبل/حین/بعد overlay بررسی شد، صدای واقعی و زیرنویس قابل‌دیدن تأیید شد. duplicate، conflict، restart و cancel هم آزموده شدند.
 
 آزمون زندهٔ Railway/Vercel، Docker build و تست بصری console در مرورگر اجرا نشده‌اند. آخرین استقرار خصوصی شما، fork URL و کلید حساب‌های cloud در این محیط در دسترس نیست. این بسته به معنای deploy شدن حساب شما نیست.
+
+## ۹. نسخهٔ 0.2.0: تحلیل، رندر دقیق‌تر زیرنویس و QA (برای SAAM)
+
+افزوده‌ها (بدون سرویس جدید؛ همه روی همان صف و همان توکن owner):
+
+| مورد | شرح |
+|---|---|
+| `POST /api/jobs` با `kind: "analyze"` | ورودی `{media_id, frames:{max,width}, asr:{engine,language,model}}`. خروجی: `analysis.json` نسخه‌دار (metadata، بلندی صدا/true peak/سکوت/clipping، فریم‌های نمایندهٔ JPEG، شاخص صحنه، و transcript با زمان هر کلمه اگر موتور رونویسی باشد). transcript بدون موتور `unavailable` است؛ متنی ساخته نمی‌شود. |
+| `POST /api/jobs` با `kind: "qa"` | ورودی `{render_job_id, expect, plan, frames_at}`. بررسی decode، container، ابعاد، طول، هم‌زمانی صدا/تصویر، بلندی صدا، سکوت، فریم سیاه و ثابت؛ خروجی `qa.json` + فریم‌های نمونه. حکم `qa_passed` / `needs_review` / `qa_failed` شاهد است نه تأیید ویرایشی. |
+| `GET /api/jobs/:id/artifacts[/name]` | فایل‌های تحلیل/QA (فقط کار `completed` از نوع analyze/qa). فایل‌ها مسطح در `outputs/` نگه داشته می‌شوند تا شمارش سقف دیسک درست بماند. |
+| گزینه‌های render | `caption_style` (فونت‌های Noto/DejaVu، اندازه، حاشیه، رنگ، جعبه، موقعیت) و `loudnorm` (دو‌گذره، هدف حدود −۱۴ LUFS و سقف true peak). |
+| `GET /api/capabilities` | نسخه، `analysis.asr` (پیکربندی و در دسترس بودن واقعی) و فونت‌های موجود. |
+
+رونویسی گفتار اختیاری است: image را با `--build-arg WITH_ASR=1 [--build-arg ASR_MODEL=small]` بساز و در Railway `ASR_ENGINE=faster-whisper` بگذار. تصویر پیش‌فرض کوچک می‌ماند. زیرنویس فارسی با libass/HarfBuzz شکل می‌گیرد؛ متن فارسی‌محور با نشانهٔ RLM شروع می‌شود. همهٔ فراخوانی‌های FFmpeg با آرایهٔ آرگومان است، نه رشتهٔ shell.
+
+محدودیت‌ها: هر کار هنوز حداکثر ۹۰۰ ثانیه (`MAX_JOB_SECONDS`)، یک کار فعال، و transition/keyframe/speed پشتیبانی نمی‌شوند. حافظه و زمان واقعی روی Railway اندازه‌گیری نشده.
 
 ## منابع اصلی
 

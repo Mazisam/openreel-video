@@ -29,4 +29,5 @@ await build({entryPoints:[resolve(here,'src/server.mjs')],outfile:resolve(here,'
 await build({entryPoints:[resolve(here,'src/project.mjs')],outfile:resolve(here,'dist/project.mjs'),
   bundle:true,platform:'node',format:'esm',target:'node22',packages:'external',plugins:[aliases]});
 copyFileSync(resolve(here,'src/render.py'), resolve(here,'dist/render.py'));
+copyFileSync(resolve(here,'src/analyze.py'), resolve(here,'dist/analyze.py'));
 console.log('BUILD_OK: real OpenReel HeadlessHost bundled; no desktop/browser runtime');

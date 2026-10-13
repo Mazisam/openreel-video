@@ -1,3 +1,15 @@
+# Validation — 0.2.0 (2026-10-13)
+
+Base `d624bd5` (hermes-cloud 0.1.0) plus the analysis/QA patch. Executed locally with Node 24, Python 3, system FFmpeg:
+
+- `npm run build` OK; **29 Node tests pass** (the original 18 plus analysis, QA, artifact route, caption style, loudnorm, fake-ASR plumbing).
+- Analysis, render with caption style and two-pass loudnorm, and QA were run on real FFmpeg output; SAAM's end-to-end test drives this build over HTTP.
+- Persian captions: libass shaping verified on rendered frames; mixed-direction caption uses an RLM prefix.
+
+NOT RUN: Docker image build, Railway deploy, real speech recognition (model download blocked here; the plumbing is tested with a fake engine), real Railway memory/time under a large source, any model or Google call.
+
+---
+
 # Validation — 2026-10-12
 
 Source: Augani/openreel-video c9340465e5d37e684cc25bdbe746c4ccd45e165c.
