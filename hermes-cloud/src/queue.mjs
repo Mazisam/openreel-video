@@ -32,9 +32,9 @@ export async function runPython(args,signal,onProgress=()=>{},script=renderer) {
     });
     child.stderr.on('data',chunk=>error=(error+chunk).slice(-4000));
     child.on('error',reject);
-    child.on('close',code=>{clearTimeout(killTimer);signal?.removeEventListener('abort',terminate);
+    child.on('close',(code,sig)=>{clearTimeout(killTimer);signal?.removeEventListener('abort',terminate);
       if(signal?.aborted) reject(new Error('JOB_ABORTED'));
-      else if(code!==0) {const e=new Error('RENDER_OR_PROBE_FAILED');e.detail=error;reject(e);}
+      else if(code!==0) {const e=new Error('RENDER_OR_PROBE_FAILED');e.detail=error.trim()?error:`WORKER_EXIT code=${code} signal=${sig??'none'} (a signal such as SIGKILL usually means the container ran out of memory)`;reject(e);}
       else {try{resolve(JSON.parse(out.trim().split('\n').at(-1)));}catch{reject(new Error('WORKER_REPLY_INVALID'));}}
     });
   });
@@ -172,6 +172,7 @@ export class Queue {
       const known=e.detail?.trim().match(/^(UNSUPPORTED_[A-Za-z_]+|SOURCE_[A-Z_]+|INVALID_[A-Z_]+|MAX_[A-Z0-9_]+|MEDIA_[A-Z_]+|ANALYSIS_[A-Z_]+|PROBE_[A-Z_]+|LOUDNESS_[A-Z_]+)\b/);
       if(known&&!controller.signal.aborted) job.error=known[1];
       if(e.detail) await fs.writeFile(this.store.path('temp',job.id,'.diagnostic.txt'),e.detail,{mode:0o600}).catch(()=>{});
+      console.error('JOB_FAILED',JSON.stringify({id:job.id,kind:job.kind,error:job.error,detail:String(e.detail??e.message).slice(-1500)}));
       if(job.kind==='render') await fs.unlink(this.store.path('outputs',job.id,'.mp4')).catch(()=>{});
       if(['analyze','qa'].includes(job.kind)) await this.dropArtifacts(job.id);
       if(job.kind==='upload') await fs.unlink(this.store.path('media',job.input.uploaded_id,'.bin')).catch(()=>{});
